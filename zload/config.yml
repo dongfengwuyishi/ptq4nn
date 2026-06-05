@@ -1,0 +1,102 @@
+# ==========================================================
+# PTQ 配置文件 (默认 CIFAR100，与 exp/cifar100/config.yml 一致)
+# 各数据集独立配置见: exp/cifar10/, exp/cifar100/, exp/cifar10-dvs/
+# 运行: python ptq/main.py --config exp/config.yml
+# ==========================================================
+
+# ========== 模型 ==========
+checkpoint: output/train/20260129-170600-sdt-data-cifar100-t-4-spike-lif/model_best.pth.tar
+
+# 模型结构参数 (与训练时一致)
+time_steps: 4
+num_classes: 100
+num_heads: 8
+img_size: 32
+in_channels: 3
+dim: 256
+mlp_ratio: 4
+layer: 2
+pooling_stat: "0011"
+TET: false
+
+# ========== 数据 ==========
+# 支持: torch/cifar10, torch/cifar100, cifar10-dvs
+dataset: torch/cifar100
+data_dir: /mnt/disk2/xh2/data
+batch_size: 64
+
+# ========== 量化 ==========
+weight_bit: 4             # 中间层权重位宽
+first_layer_bit: 16       # 首层权重位宽
+last_layer_bit: 16         # 末层权重位宽 (分类头)
+mem_bit: 4                # 膜电位位宽 (32=不量化, 4/8等开启)
+fold_bn: true             # 融合 BN
+
+# ========== 量化方法 ==========
+# fake_quant: 'fixed' (RTN) | 'adaround' (layer-wise AdaRound)
+fake_quant: adaround
+adaround_iters: 500       # AdaRound 每层迭代数
+adaround_lr: 0.003        # AdaRound Adam 学习率
+# adaround_recon_bs: 32   # 每步随机子样本 batch 大小（可选）
+
+# ========== Scale Bridging (膜电位 scale 策略) ==========
+# 'weight'   : 直接使用权重 scale (PTQ4SNN style)
+# 'observer' : 使用 observer 独立校准的 scale (最高精度, 但硬件不友好)
+# 'pot'      : Power-of-2 bridging: s_mem = s_w * 2^k (硬件友好, 只需 bit-shift)
+scale_bridge: pot
+
+# ========== 运行 ==========
+gpu: 3
+output_dir: output/ptq/cifar100
+
+seed: 520
+
+
+# ==========================================================
+# 其他数据集示例 (取消注释并替换上方对应字段):
+#
+# --- CIFAR10 ---
+# checkpoint: output/train/20260115-214127-sdt-data-cifar10-t-4-spike-lif/model_best.pth.tar
+# num_classes: 10
+# dataset: torch/cifar10
+# pooling_stat: "0011"
+#
+# --- CIFAR10-DVS ---
+# checkpoint: output/train/20260129-164839-sdt-data-cifar10-dvs-t-10-spike-lif/model_best.pth.tar
+# time_steps: 10
+# num_classes: 10
+# img_size: 64
+# in_channels: 2
+# dataset: cifar10-dvs
+# data_dir: /mnt/disk2/xh2/data/cifar10_dvs
+# pooling_stat: "1111"
+# TET: true
+# ==========================================================
+
+
+
+# -------------------------
+# 准确率记载
+# fixed
+# Weight bits:       4 (first: 16, last: 8)
+#   Original  Acc@1:   76.10%
+#   After BN  Acc@1:   76.02%  (diff: 0.0800%)
+#   Quantized Acc@1:   73.83%
+#   Accuracy drop:     2.27%
+#   Original  size:    9.92 MB
+#   Quantized size:    1.26 MB
+#   Compression:       7.85x
+# 膜电位：4bit     Quantized Acc@1:   67.21%
+# Quantized Acc@1:   65.88%  用权重scale
+
+# adaround
+# Weight bits:       4 (first: 16, last: 8)
+#   Original  Acc@1:   76.10%
+#   After BN  Acc@1:   76.02%  (diff: 0.0800%)
+#   Quantized Acc@1:   75.63%
+#   Accuracy drop:     0.47%
+#   Original  size:    9.92 MB
+#   Quantized size:    1.26 MB
+#   Compression:       7.85x
+# 膜电位：4bit   Quantized Acc@1:   70.42%
+# Quantized Acc@1:   68.22%.    用权重scale
