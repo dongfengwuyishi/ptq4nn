@@ -13,12 +13,20 @@ membrane precision using firing activity and quantization sensitivity.
 
 ![PTQ4SNN framework: mixed-bit membrane quantization and Unified Scale Bridge](assets/overview.png)
 
-## Included implementation
+## Method in the paper
 
 | Backbone | Channel-wise scale bridge | Membrane precision |
 | --- | --- | --- |
-| Spike-Driven Transformer (SDT) | Yes | Uniform precision |
-| Convolutional SNNs (SEW-ResNet / VGG) | Yes | Channel-wise MPBA or uniform precision |
+| Spike-Driven Transformer (SDT) | Yes | Channel-wise MPBA (2/4/8 bit) |
+| Convolutional SNNs (SEW-ResNet / VGG) | Yes | Channel-wise MPBA (2/4/8 bit) |
+
+In the paper, **W4/M4** denotes 4-bit weights and an element-count-weighted average
+membrane precision of approximately 4 bits. MPBA assigns 2, 4, or 8 bits to individual
+membrane channels according to firing activity and quantization sensitivity. The
+Unified Scale Bridge is calibrated under the assigned channel-wise bit widths;
+protected layers or channels can retain higher precision.
+
+## Code structure
 
 The repository provides calibration and evaluation entry points for SDT and
 convolutional SNNs, with configurations for ImageNet, CIFAR10-DVS, and CIFAR-100.
