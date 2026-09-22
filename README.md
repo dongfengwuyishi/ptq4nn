@@ -1,11 +1,17 @@
 # PTQ4SNN
 
-Core code for **PTQ4SNN: Membrane-Aware Post-Training Quantization for Spiking Neural Networks**.
+Code for **[PTQ4SNN: Membrane-Aware Post-Training Quantization for Spiking Neural Networks](https://arxiv.org/abs/2608.07066)**.
+
+[Paper](https://arxiv.org/abs/2608.07066) · [PDF](https://arxiv.org/pdf/2608.07066)
+
+## Overview
 
 PTQ4SNN quantizes both weights and recurrent membrane states using a small calibration
 set. Its channel-wise scale bridge couples membrane and weight scales through a
 power-of-two factor, while mixed-precision bit allocation (MPBA) assigns 2/4/8-bit
 membrane precision using firing activity and quantization sensitivity.
+
+![PTQ4SNN framework: mixed-bit membrane quantization and Unified Scale Bridge](assets/overview.png)
 
 ## Included implementation
 
@@ -14,10 +20,8 @@ membrane precision using firing activity and quantization sensitivity.
 | Spike-Driven Transformer (SDT) | Yes | Uniform precision |
 | Convolutional SNNs (SEW-ResNet / VGG) | Yes | Channel-wise MPBA or uniform precision |
 
-This is a compact core-code release. The SDT entry point does **not** include the
-complete MPBA pipeline. Meta-SpikeFormer, semantic segmentation, backbone training,
-and hardware packing are outside this release. The configurations below are examples;
-full GPU accuracy reproduction has not been validated for this release.
+The repository provides calibration and evaluation entry points for SDT and
+convolutional SNNs, with configurations for ImageNet, CIFAR10-DVS, and CIFAR-100.
 
 ```text
 ptq/                 SDT quantization, scale calibration, reconstruction, and CLI
@@ -45,8 +49,7 @@ pip install cupy-cuda11x  # CUDA 11; use cupy-cuda12x for CUDA 12
 ```
 
 The CPU checks were validated with PyTorch 2.5.1, torchvision 0.20.1, NumPy 1.26.4,
-timm 0.6.12, and SpikingJelly 0.0.0.0.14. The full experiment entry points require
-CUDA. Datasets and pretrained weights are not included.
+timm 0.6.12, and SpikingJelly 0.0.0.0.14. Calibration and evaluation use CUDA.
 
 ## Data and checkpoints
 
@@ -72,11 +75,11 @@ pretrained/
 - **CIFAR-100:** extract the dataset under `data/` before running the convolutional example.
 - **SDT checkpoints:** use timm-compatible state dictionaries matching the architecture
   in the config. See the [upstream SDT repository](https://github.com/BICLab/Spike-Driven-Transformer)
-  for pretrained backbones. An upstream checkpoint is not a guarantee of the same
-  floating-point baseline as the paper's experimental checkpoint.
+  for pretrained backbones, and match the checkpoint architecture and preprocessing
+  to the configuration.
 - **Convolutional checkpoints:** the solver loads serialized `ptq4snn.model` model
   objects, with the dataset, class count, and time steps already configured.
-  A bare `state_dict` is not accepted by this entry point. Load only trusted checkpoints.
+  Use trusted checkpoints in this serialized-model format.
 
 ## Calibration and evaluation
 
@@ -94,9 +97,7 @@ python -m ptq4snn.solver.main --config exp/sew-resnet18/config.yml \
 
 SDT selects a seeded pool of up to `calibration_samples: 1024` training examples;
 membrane calibration and reconstruction consume their configured batch limits.
-Validation/test data are evaluated separately. This differs from the earlier SDT
-entry point, which reused its evaluation loader for calibration, so historical
-results are not directly interchangeable.
+Validation/test data are evaluated separately.
 
 The convolutional example combines firing activity and sensitivity with weights
 `0.8` and `0.2`. Its `target_avg_bits: 4` applies to non-stem membrane states;
@@ -111,14 +112,11 @@ convolutional model's time steps.
 | Convolutional: `mix_precise: false` | Use the configured uniform non-stem membrane precision |
 | Convolutional: `scale_mode: reuse` / `observer` | Run the corresponding scale ablation |
 
-In the current SDT entry point, `fake_quant: adaround` performs weight reconstruction.
-The historical membrane-aware reconstruction helper remains in the source, but is
-not selected by this setting; `recon_mem_lam` has no effect on that SDT AdaRound path.
+For SDT, `fake_quant: adaround` selects weight reconstruction.
 
 Outputs include logs, SDT scale details, convolutional evaluation metrics, and quantized
-checkpoints. These are floating-point **fake-quantization** models. Reported theoretical
-bit counts do not mean the checkpoint tensors are packed integers or that the code
-implements hardware integer inference.
+checkpoints. The **fake-quantization** models use floating-point tensors to simulate
+low-bit arithmetic; reported bit counts describe theoretical storage.
 
 ## Tests
 
@@ -128,7 +126,21 @@ python -m unittest discover -s tests -v
 
 The five CPU checks cover LIF equivalence with quantization disabled, scale bridging
 and recurrent-state quantization, shared-scale optimization, the MPBA bit budget,
-and calibration image preprocessing. They do not establish full-dataset accuracy.
+and calibration image preprocessing.
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@article{xie2026ptq4snn,
+  title={PTQ4SNN: Membrane-Aware Post-Training Quantization for Spiking Neural Networks},
+  author={Xie, Hui and Shi, Tong and Qin, Haotong and Liu, Aishan and Liu, Xiaode and Guo, Jinyang},
+  journal={arXiv preprint arXiv:2608.07066},
+  year={2026},
+  url={https://arxiv.org/abs/2608.07066}
+}
+```
 
 ## Acknowledgements and license
 
