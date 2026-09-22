@@ -1,16 +1,11 @@
 """Small CPU checks; no datasets or pretrained checkpoints required."""
-import copy
 import logging
 import unittest
 
 import numpy as np
 import torch
 from easydict import EasyDict
-from spikingjelly.clock_driven.neuron import MultiStepLIFNode
-
-from ptq.observer import lsq_unified_scale_optim
-from ptq.main import CalibrationSubset
-from ptq.quantized_module import QuantMultiStepLIFNode
+from ptq4snn.quantization.quantized_module import QNeuron
 from ptq4snn.model.common import LIFNeuron
 from ptq4snn.solver.bit_allocation import allocate_bits_per_channel
 
@@ -19,60 +14,39 @@ class CoreTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(7)
 
-    def test_calibration_subset_receives_image_transforms(self):
-        from PIL import Image
-        from timm.data import create_loader
-
-        class Images(torch.utils.data.Dataset):
-            transform = None
-
-            def __len__(self):
-                return 4
-
-            def __getitem__(self, index):
-                image = Image.new('RGB', (16, 16))
-                return self.transform(image) if self.transform else image, index
-
-        subset = CalibrationSubset(Images(), [1, 3])
-        loader = create_loader(subset, input_size=(3, 8, 8), batch_size=2,
-                               is_training=False, use_prefetcher=False,
-                               num_workers=0, persistent_workers=False)
-        images, indices = next(iter(loader))
-        self.assertEqual(images.shape, (2, 3, 8, 8))
-        self.assertEqual(indices.tolist(), [1, 3])
+    @staticmethod
+    def neuron_config():
+        return EasyDict(bit=4, learnable_factor=False, ch_axis=0,
+                        factor_init_by_observe=True, limit_mem_range=True,
+                        idea1=True, scale_mode='bridge')
 
     def test_disabled_membrane_quantization_matches_lif(self):
-        original = MultiStepLIFNode(tau=2.0, backend='torch')
-        quantized = QuantMultiStepLIFNode(copy.deepcopy(original), mem_bit=4)
-        quantized.mem_fake_quant.disable_observer()
-        quantized.mem_fake_quant.disable_fake_quant()
+        original = LIFNeuron(tau=2.0, step_mode='m')
+        quantized = QNeuron(tau=2.0, step_mode='m', qconfig=self.neuron_config())
         x = torch.randn(4, 2, 3, 4, 4)
-        torch.testing.assert_close(quantized(x), original(x))
-        torch.testing.assert_close(quantized.original_lif.v, original.v)
+        torch.testing.assert_close(quantized((x, torch.ones(3))), original(x))
+        torch.testing.assert_close(quantized.mem, original.mem)
 
-    def test_bridge_and_recurrent_state_grid(self):
-        node = QuantMultiStepLIFNode(MultiStepLIFNode(backend='torch'), mem_bit=4)
-        node._pot_k = torch.tensor([-1., 0., 2.])
+    def test_bridge_with_channelwise_bits(self):
+        node = QNeuron(qconfig=self.neuron_config())
+        node.set_bit([2, 4, 8])
+        node.set_factor_init_mask(True)
         weight_scale = torch.tensor([0.1, 0.2, 0.05])
+        node.enable_observer()
+        node((torch.zeros(2, 3, 2, 2), weight_scale))
+        node.disable_observer()
+        node.reset()
         node.enable_fake_quant()
-        output = node((torch.randn(4, 2, 3, 2, 2), weight_scale))
-        expected_scale = torch.tensor([0.05, 0.2, 0.2])
-        torch.testing.assert_close(node.mem_fake_quant.scale, expected_scale)
-        codes = node.original_lif.v_seq / expected_scale.view(1, 1, 3, 1, 1)
-        torch.testing.assert_close(codes, codes.round())
-        self.assertGreaterEqual(codes.min().item(), -8)
-        self.assertLessEqual(codes.max().item(), 7)
-        self.assertTrue(torch.all((output == 0) | (output == 1)))
-
-    def test_shared_scale_optimization(self):
-        weights = torch.randn(3, 32) * 0.2
-        membrane = torch.randn(3, 48) * 0.4
-        scale = lsq_unified_scale_optim(
-            weights, membrane, torch.full((3,), 0.05),
-            torch.tensor([0., 1., 2.]), 4, 4, num_iters=3,
-        )
-        self.assertEqual(scale.shape, (3,))
-        self.assertTrue(torch.all(torch.isfinite(scale) & (scale > 0)))
+        shifts = node.factor_exp.detach()
+        torch.testing.assert_close(shifts, shifts.round())
+        self.assertGreater(shifts.unique().numel(), 1)
+        for x in torch.randn(4, 2, 3, 2, 2):
+            output = node((x, weight_scale))
+            codes = node.mem / weight_scale.view(1, 3, 1, 1)
+            torch.testing.assert_close(codes, codes.round(), atol=1e-5, rtol=1e-5)
+            self.assertTrue(torch.all(codes >= node.min_val.view(1, 3, 1, 1) - 1e-5))
+            self.assertTrue(torch.all(codes <= node.max_val.view(1, 3, 1, 1) + 1e-5))
+            self.assertTrue(torch.all((output == 0) | (output == 1)))
 
     def test_mpba_element_weighted_budget(self):
         class ToySNN(torch.nn.Module):
