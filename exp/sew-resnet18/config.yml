@@ -1,0 +1,58 @@
+num_workers: 4
+batch_size: 128
+gpu: 0
+quant:
+  activity_mem_weight: 0
+  activity_rate_weight: 0.8
+  loss_salience_weight: 0.2
+  mix_precise: true
+  target_avg_bits: 4
+  activity_percentile_low: 50
+  activity_percentile_high: 96
+  activity_batch_size: 32
+  activity_batches: null
+  salience_batch_size: 16
+  salience_batches: 10
+  calibration_batch_size: 32
+  m_qconfig:
+    limit_mem_range: true
+    bit: 4
+    learnable_factor: false
+    ch_axis: 0
+    factor_init_by_observe: true
+    idea1: true
+    scale_mode: bridge
+  w_qconfig:
+    quantizer: AdaRoundFakeQuantize
+    observer: MSEObserver
+    bit: 4
+    symmetric: true
+    ch_axis: 0
+  calibrate: 1024
+  recon:
+    scope: block
+    batch_size: 32
+    lr: 0.001
+    warm_up: 0.2
+    weight: 0.01
+    iters: 20000
+    lambda_pre: 0.1
+    b_range:
+    - 20
+    - 2
+    keep_gpu: true
+    round_mode: learned_hard_sigmoid
+model:
+  type: resnet18
+  path: pretrained/sew_resnet18_cifar100.pth
+data:
+  dataset_name: cifar100
+  data_root: data
+  data_aug: false
+  mixup: false
+  cutmix: false
+  random_erase: false
+process:
+  seed: 0
+  save_model: true
+  metric_samples: 1024

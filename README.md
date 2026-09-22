@@ -1,138 +1,142 @@
-# Spike-Driven Transformer ([NeurIPS2023](https://openreview.net/forum?id=9FmolyOHi5))
+# PTQ4SNN
 
-[Man Yao](https://scholar.google.com/citations?user=eE4vvp0AAAAJ), [Jiakui Hu](https://github.com/jkhu29), [Zhaokun Zhou](https://github.com/ZK-Zhou), [Li Yuan](https://yuanli2333.github.io/), [Yonghong Tian](https://scholar.google.com/citations?user=fn6hJx0AAAAJ), [Bo Xu](), [Guoqi Li](https://scholar.google.com/citations?user=qCfE--MAAAAJ&)
+Core code for **PTQ4SNN: Membrane-Aware Post-Training Quantization for Spiking Neural Networks**.
 
-BICLab, Institute of Automation, Chinese Academy of Sciences
+PTQ4SNN quantizes both weights and recurrent membrane states using a small calibration
+set. Its channel-wise scale bridge couples membrane and weight scales through a
+power-of-two factor, while mixed-precision bit allocation (MPBA) assigns 2/4/8-bit
+membrane precision using firing activity and quantization sensitivity.
 
----
+## Included implementation
 
-:rocket:  :rocket:  :rocket: **News**:
+| Backbone | Channel-wise scale bridge | Membrane precision |
+| --- | --- | --- |
+| Spike-Driven Transformer (SDT) | Yes | Uniform precision |
+| Convolutional SNNs (SEW-ResNet / VGG) | Yes | Channel-wise MPBA or uniform precision |
 
-- **Jul. 04, 2023**: Release the code for training and testing.
-- **Sep. 22, 2023**: Accepted as poster in NeurIPS2023.
-- **Sep. 30, 2023**: Release the configs and pre-trained parameters on IN1K.
-- **Feb. 15. 2024**: The [Spike-Driven Transformer V2](https://github.com/BICLab/Spike-Driven-Transformer-V2), which achieves 80.0% acc on IN1K, is now available.
+This is a compact core-code release. The SDT entry point does **not** include the
+complete MPBA pipeline. Meta-SpikeFormer, semantic segmentation, backbone training,
+and hardware packing are outside this release. The configurations below are examples;
+full GPU accuracy reproduction has not been validated for this release.
 
-## Abstract
-
-Spiking Neural Networks (SNNs) provide an energy-efficient deep learning option due to their unique spike-based event-driven (i.e., spike-driven) paradigm. In this paper, we incorporate the spike-driven paradigm into Transformer by the proposed Spike-driven Transformer with four unique properties: i) **Event-driven**, no calculation is triggered when the input of Transformer is zero; ii) **Binary spike communication**, all matrix multiplications associated with the spike matrix can be transformed into sparse additions; iii) **Self-attention with linear complexity at both token and channel dimensions**; iv) The operations between spike-form Query, Key, and Value are mask and addition. Together, **there are only sparse addition operations** in the Spike-driven Transformer. To this end, we design a novel Spike-Driven Self-Attention (SDSA), which exploits only mask and addition operations without any multiplication, and thus having up to **87.2× lower** computation energy than vanilla self-attention. Especially in SDSA, the matrix multiplication between Query, Key, and Value is designed as the mask operation. In addition, we rearrange all residual connections in the vanilla Transformer before the activation functions to ensure that all neurons transmit binary spike signals. It is shown that the Spike-driven Transformer can achieve **77.1% top-1** accuracy on ImageNet-1K, which is the state-of-the-art result in the SNN field.
-
-![SDSA](./imgs/Fig_1_main_idea.png)
+```text
+ptq/                 SDT quantization, scale calibration, reconstruction, and CLI
+model/, module/      Spike-Driven Transformer backbone
+ptq4snn/
+  model/             Convolutional backbones and LIF neurons
+  quantization/      Weight and membrane quantizers
+  solver/            Activity/sensitivity statistics, MPBA, reconstruction, and CLI
+  utils/             Data loading and evaluation
+exp/
+  imagenet/          SDT-8-768, T=4
+  cifar10-dvs/        SDT-2-256, T=10
+  sew-resnet18/       SEW-ResNet18 on CIFAR-100
+tests/               Small CPU checks
+```
 
 ## Requirements
 
-```python3
-timm == 0.6.12
-1.10.0 <= pytorch < 2.0.0
-cupy
-spikingjelly == 0.0.0.0.12
-tensorboard
+Use Python 3.10. Install a compatible CUDA-enabled PyTorch/torchvision pair, then:
+
+```bash
+pip install -r requirements.txt
+# Choose the CuPy package matching your CUDA runtime for the original SDT backend:
+pip install cupy-cuda11x  # CUDA 11; use cupy-cuda12x for CUDA 12
 ```
 
-> !!! Please install the spikingjelly and tensorboard correctly before raising issues about requirements. !!!
+The CPU checks were validated with PyTorch 2.5.1, torchvision 0.20.1, NumPy 1.26.4,
+timm 0.6.12, and SpikingJelly 0.0.0.0.14. The full experiment entry points require
+CUDA. Datasets and pretrained weights are not included.
 
-## Results on Imagenet-1K
+## Data and checkpoints
 
-|        **model**         | **T** | **layers** | **channels** | **Top-1 Acc** | **Power(mj)** | **Models** |
-| :----------------------: | :---: | :--------: | :----------: | :-----------: | :-----------: | :--------: |
-| Spike-Driven Transformer |   4   |     8      |     384      |   **72.28**   |   **3.90**    |    [link](https://drive.google.com/file/d/10oH_zkwB4FDtFLgmZ_lI8e0tFjRzrXyD/view?usp=sharing)    |
-| Spike-Driven Transformer |   4   |     6      |     512      |   **74.11**   |   **3.56**    |    [link](https://drive.google.com/file/d/1hsShpFBKYpMK2TmpuoyBFORcLAuMHrx7/view?usp=sharing)    |
-| Spike-Driven Transformer |   4   |     8      |     512      |   **74.57**   |   **4.50**    |    [link](https://drive.google.com/file/d/1n59WNSBgP2VyAW2nfJX2Wvx5rgNJEMXI/view?usp=sharing)    |
-| Spike-Driven Transformer |   4   |     10     |     512      |   **74.66**   |   **5.53**    |    [link](https://drive.google.com/file/d/1l-c3QY5r4IFmYUmGPZXRHP_W7iC1sdP8/view?usp=sharing)    |
-| Spike-Driven Transformer |   4   |     8      |     768      |   **77.07**   |   **6.09**    |    [link](https://drive.google.com/file/d/1R-MaeFV8d2Y0pIGBSjklOGWhaF8dLHf4/view?usp=sharing)    |
+Run all commands from the repository root and update paths and `gpu` in your chosen
+configuration. Example paths use this layout:
 
-## Train & Test
-
-![The architecture of Spike-Driven-Transformer.](./imgs/Fig_2_network_architecture.png)
-
-The hyper-parameters are in `./conf/`.
-
-
-Train:
-
-```shell
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port 29501 train.py -c /the/path/of/conf --model sdt --spike-mode lif
+```text
+data/
+  imagenet/
+    train/<class>/*.JPEG
+    val/<class>/*.JPEG
+  cifar10_dvs/          SpikingJelly event/frame data
+  cifar-100-python/     Extracted CIFAR-100 data
+pretrained/
+  sdt_8_768.pth
+  sdt_2_256_dvs.pth.tar
+  sew_resnet18_cifar100.pth
 ```
 
-Test:
+- **ImageNet:** use the standard class-folder training and validation splits.
+- **CIFAR10-DVS:** the loader uses SpikingJelly's 10-frame representation and a seeded
+  90/10 class-stratified training/test split.
+- **CIFAR-100:** extract the dataset under `data/` before running the convolutional example.
+- **SDT checkpoints:** use timm-compatible state dictionaries matching the architecture
+  in the config. See the [upstream SDT repository](https://github.com/BICLab/Spike-Driven-Transformer)
+  for pretrained backbones. An upstream checkpoint is not a guarantee of the same
+  floating-point baseline as the paper's experimental checkpoint.
+- **Convolutional checkpoints:** the solver loads serialized `ptq4snn.model` model
+  objects, with the dataset, class count, and time steps already configured.
+  A bare `state_dict` is not accepted by this entry point. Load only trusted checkpoints.
 
-```shell
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port 29501 firing_num.py -c /the/path/of/conf --model sdt --spike-mode lif --resume /the/path/of/parameters --no-resume-opt
+## Calibration and evaluation
 
-# for 288 x 288 resolution
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 --master_port 29501 firing_num.py -c /the/path/of/conf --model sdt --spike-mode lif --resume /the/path/of/parameters --no-resume-opt --large-valid
+```bash
+# SDT-8-768 / ImageNet
+python -m ptq.main --config exp/imagenet/config.yml
+
+# SDT-2-256 / CIFAR10-DVS
+python -m ptq.main --config exp/cifar10-dvs/config.yml
+
+# SEW-ResNet18 / CIFAR-100: bridge + MPBA
+python -m ptq4snn.solver.main --config exp/sew-resnet18/config.yml \
+  --log_save_dir output/sew-resnet18
 ```
 
-Result and explainability:
+SDT selects a seeded pool of up to `calibration_samples: 1024` training examples;
+membrane calibration and reconstruction consume their configured batch limits.
+Validation/test data are evaluated separately. This differs from the earlier SDT
+entry point, which reused its evaluation loader for calibration, so historical
+results are not directly interchangeable.
 
-![The Attention Map of Spike-Driven Transformer in ImageNet.](./imgs/Fig_3_attention_map.png)
+The convolutional example combines firing activity and sensitivity with weights
+`0.8` and `0.2`. Its `target_avg_bits: 4` applies to non-stem membrane states;
+the first membrane layer is protected at 16 bits. The checkpoint determines the
+convolutional model's time steps.
 
-## Data Prepare
+| Setting | Effect |
+| --- | --- |
+| SDT: `scale_bridge: unify` | Select per-channel integer shifts, then optimize shared scales |
+| Convolutional: `m_qconfig.scale_mode: bridge` | Enable interval-calibrated power-of-two scaling |
+| Convolutional: `mix_precise: true` | Allocate channel-wise 2/4/8-bit membrane precision |
+| Convolutional: `mix_precise: false` | Use the configured uniform non-stem membrane precision |
+| Convolutional: `scale_mode: reuse` / `observer` | Run the corresponding scale ablation |
 
-- use `PyTorch` to load the CIFAR10 and CIFAR100 dataset.
-- use `SpikingJelly` to prepare and load the Gesture and CIFAR10-DVS dataset.
+In the current SDT entry point, `fake_quant: adaround` performs weight reconstruction.
+The historical membrane-aware reconstruction helper remains in the source, but is
+not selected by this setting; `recon_mem_lam` has no effect on that SDT AdaRound path.
 
-Tree in `./data/`.
+Outputs include logs, SDT scale details, convolutional evaluation metrics, and quantized
+checkpoints. These are floating-point **fake-quantization** models. Reported theoretical
+bit counts do not mean the checkpoint tensors are packed integers or that the code
+implements hardware integer inference.
 
-```shell
-.
-├── cifar-100-python
-├── cifar-10-batches-py
-├── cifar10-dvs
-│   ├── download
-│   ├── events_np
-│   ├── extract
-│   ├── frames_number_10_split_by_number
-│   └── frames_number_16_split_by_number
-├── cifar10-dvs-tet
-│   ├── test
-│   └── train
-└── DVSGesturedataset
-    ├── download
-    ├── events_np
-    │   ├── test
-    │   └── train
-    ├── extract
-    │   └── DvsGesture
-    ├── frames_number_10_split_by_number
-    │   ├── download
-    │   ├── test
-    │   └── train
-    └── frames_number_16_split_by_number
-        ├── test
-        └── train
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
-ImageNet with the following folder structure, you can extract imagenet by this [script](https://gist.github.com/BIGBALLON/8a71d225eff18d88e469e6ea9b39cef4).
+The five CPU checks cover LIF equivalence with quantization disabled, scale bridging
+and recurrent-state quantization, shared-scale optimization, the MPBA bit budget,
+and calibration image preprocessing. They do not establish full-dataset accuracy.
 
-```shell
-│imagenet/
-├──train/
-│  ├── n01440764
-│  │   ├── n01440764_10026.JPEG
-│  │   ├── n01440764_10027.JPEG
-│  │   ├── ......
-│  ├── ......
-├──val/
-│  ├── n01440764
-│  │   ├── ILSVRC2012_val_00000293.JPEG
-│  │   ├── ILSVRC2012_val_00002138.JPEG
-│  │   ├── ......
-│  ├── ......
-```
+## Acknowledgements and license
 
-## Contact Information
+The SDT backbone is based on [Spike-Driven Transformer](https://github.com/BICLab/Spike-Driven-Transformer)
+by Man Yao et al. This code uses [SpikingJelly](https://github.com/fangwei123456/spikingjelly)
+and [timm](https://github.com/huggingface/pytorch-image-models).
 
-```
-@inproceedings{yao2023spikedriven,
-title={Spike-driven Transformer},
-author={Man Yao and JiaKui Hu and Zhaokun Zhou and Li Yuan and Yonghong Tian and Bo XU and Guoqi Li},
-booktitle={Thirty-seventh Conference on Neural Information Processing Systems},
-year={2023},
-url={https://openreview.net/forum?id=9FmolyOHi5}
-}
-```
+The existing repository's [Apache-2.0 license](LICENSE) is retained, along with the
+[upstream SDT license text](licenses/SDT-Apache-2.0.txt).
 
-For help or issues using this git, please submit a GitHub issue.
-
-For other communications related to this git, please contact `manyao@ia.ac.cn` and `jkhu29@stu.pku.edu.cn`.
+For questions about this repository, please open a GitHub issue.

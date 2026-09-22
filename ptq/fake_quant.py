@@ -184,11 +184,13 @@ class AdaRoundFakeQuantize(FakeQuantizeBase):
         self.register_buffer("scale", torch.tensor([1.0], dtype=torch.float))
         self.register_buffer("zero_point", torch.tensor([0], dtype=torch.int))
         self.adaround = False
+        self.hard_value = False
         self.gamma, self.zeta = -0.1, 1.1
 
     def init(self, weight_tensor: torch.Tensor, round_mode='learned_hard_sigmoid'):
         """初始化 AdaRound, 从 weight_tensor 计算 alpha 参数"""
         self.adaround = True
+        self.hard_value = False
         self.round_mode = round_mode
         self._init_alpha(x=weight_tensor.data.clone().detach())
 
@@ -281,7 +283,7 @@ class AdaRoundFakeQuantize(FakeQuantizeBase):
                 if not hasattr(self, 'alpha'):
                     raise RuntimeError("AdaRound enabled but alpha not initialized. Call init() first.")
                 if self.round_mode == 'learned_hard_sigmoid':
-                    X = self.adaround_forward(X)
+                    X = self.adaround_forward(X, hard_value=self.hard_value)
                 else:
                     raise NotImplementedError(f"Unknown round_mode: {self.round_mode}")
         return X
@@ -290,6 +292,11 @@ class AdaRoundFakeQuantize(FakeQuantizeBase):
 FAKEQUANT_MAP = {
     'fixed': FixedFakeQuantize,
     'adaround': AdaRoundFakeQuantize,
+    # GPTQ uses fixed round-to-nearest fake quant after weight compensation.
+    'gptq': FixedFakeQuantize,
+    # BRECQ/QDrop-style baselines optimize weights around a fixed quant grid.
+    'brecq': FixedFakeQuantize,
+    'qdrop': FixedFakeQuantize,
 }
 
 

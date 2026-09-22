@@ -56,7 +56,7 @@ class PTQConfig:
             scale；>=32 表示该层不做膜电位量化。仅当 mem_bit < 32 时生效。
         fold_bn: 是否融合 BatchNorm (默认 True)
         observer: Observer 类型 ('minmax', 'avgminmax', 'mse', 'percentile')
-        fake_quant: FakeQuantize 类型 ('fixed', 'adaround')
+        fake_quant: FakeQuantize 类型 ('fixed', 'adaround', 'gptq', 'brecq', 'qdrop')
         adaround_iters: AdaRound 逐层优化迭代数
         adaround_lr: AdaRound 学习率
         scale_bridge: 膜电位 scale 策略
@@ -86,6 +86,21 @@ class PTQConfig:
     recon_improve_eps: float = 1e-6
     recon_grad_clip: float = 1.0
     recon_log_interval: int = 100
+    gptq_num_batches: int = 8
+    gptq_damp: float = 0.01
+    gptq_block_size: int = 128
+    gptq_max_samples: int = 32768
+    block_recon_num_batches: int = 8
+    block_recon_iters: int = 500
+    block_recon_lr: float = 3e-3
+    block_recon_reg_lam_scale: float = 1e-4
+    block_recon_max_code_shift: float = 2.0
+    block_recon_min_iters: int = 50
+    block_recon_early_stop_patience: int = 0
+    block_recon_improve_eps: float = 1e-6
+    block_recon_grad_clip: float = 1.0
+    block_recon_log_interval: int = 100
+    qdrop_prob: float = 0.5
     scale_bridge: str = 'weight'
     use_tet: bool = False
 
@@ -361,15 +376,28 @@ def quantize_model(model, config: PTQConfig, cali_data=None, device='cuda',
         log(f"  AdaRound iters: {config.adaround_iters}")
         log(f"  AdaRound lr:    {config.adaround_lr}")
         log(
-            f"  Recon:          batches={config.recon_num_batches}, "
-            f"mem_lam={config.recon_mem_lam}, "
-            f"reg_scale={config.recon_reg_lam_scale}, "
-            f"max_shift={config.recon_max_code_shift}"
+            f"  AdaRound recon: batches={config.recon_num_batches}, "
+            f"round_reg={config.recon_reg_lam_scale}, "
+            f"grad_clip={config.recon_grad_clip}"
+        )
+    if config.fake_quant == 'gptq':
+        log(
+            f"  GPTQ:           batches={config.gptq_num_batches}, "
+            f"damp={config.gptq_damp}, block={config.gptq_block_size}, "
+            f"max_samples={config.gptq_max_samples}"
+        )
+    if config.fake_quant in ('brecq', 'qdrop'):
+        log(
+            f"  Block recon:    batches={config.block_recon_num_batches}, "
+            f"iters={config.block_recon_iters}, lr={config.block_recon_lr}, "
+            f"reg_scale={config.block_recon_reg_lam_scale}, "
+            f"max_shift={config.block_recon_max_code_shift}"
         )
         log(
-            f"                  min_iters={config.recon_min_iters}, "
-            f"patience={config.recon_early_stop_patience or 'auto'}, "
-            f"grad_clip={config.recon_grad_clip}"
+            f"                  min_iters={config.block_recon_min_iters}, "
+            f"patience={config.block_recon_early_stop_patience or 'auto'}, "
+            f"grad_clip={config.block_recon_grad_clip}, "
+            f"qdrop_prob={config.qdrop_prob if config.fake_quant == 'qdrop' else 0.0}"
         )
     if config.mem_bit < 32:
         mem_obs_name = config.mem_observer if config.mem_observer else config.observer
@@ -409,6 +437,38 @@ def quantize_model(model, config: PTQConfig, cali_data=None, device='cuda',
             improve_eps=config.recon_improve_eps,
             grad_clip=config.recon_grad_clip,
             log_interval=config.recon_log_interval,
+            device=device,
+            logger=logger,
+        )
+    elif config.fake_quant == 'gptq':
+        if cali_data is None:
+            raise ValueError("GPTQ requires cali_data (DataLoader) for Hessian estimation")
+        gptq_optimize(
+            model, cali_data,
+            num_batches=config.gptq_num_batches,
+            damp=config.gptq_damp,
+            block_size=config.gptq_block_size,
+            max_samples=config.gptq_max_samples,
+            device=device,
+            logger=logger,
+        )
+    elif config.fake_quant in ('brecq', 'qdrop'):
+        if cali_data is None:
+            raise ValueError("Block reconstruction requires cali_data (DataLoader)")
+        block_reconstruct_optimize(
+            model, cali_data,
+            method=config.fake_quant,
+            num_batches=config.block_recon_num_batches,
+            num_iters=config.block_recon_iters,
+            lr=config.block_recon_lr,
+            reg_lam_scale=config.block_recon_reg_lam_scale,
+            max_code_shift=config.block_recon_max_code_shift,
+            min_iters=config.block_recon_min_iters,
+            early_stop_patience=config.block_recon_early_stop_patience,
+            improve_eps=config.block_recon_improve_eps,
+            grad_clip=config.block_recon_grad_clip,
+            log_interval=config.block_recon_log_interval,
+            qdrop_prob=config.qdrop_prob,
             device=device,
             logger=logger,
         )
@@ -487,7 +547,7 @@ def _plot_weight_and_scaled_membrane(layer_name, w_per_ch, m_per_ch, k, s_w,
                     label='Weight', color='#4C72B0')
         ax_top.hist(m_scaled, bins=60, alpha=0.6, density=True,
                     label=rf'Mem / $2^{{{int(k_val)}}}$', color='#DD8452')
-        ax_top.set_title(f'Ch {c}  (bridged: m / 2^k)')
+        ax_top.set_title(f'Ch {c}  (bridged: m / 2^k)', fontsize=22)
         _draw_quant_grid_on_axis(ax_top, scale_w, qmin_w, qmax_w, '#2E5AAC', '--')
         if m_bit <= 8:
             _draw_quant_grid_on_axis(ax_top, scale_w, qmin_m, qmax_m, '#C45C26', ':')
@@ -501,17 +561,18 @@ def _plot_weight_and_scaled_membrane(layer_name, w_per_ch, m_per_ch, k, s_w,
             rf'$s_w$={scale_w:.4g}, $k$={int(k_val)}' + '\n'
             rf'w: [{qmin_w},{qmax_w}]·$s_w$' + '\n'
             + m_legend_top,
-            transform=ax_top.transAxes, fontsize=7, verticalalignment='top',
+            transform=ax_top.transAxes, fontsize=16, verticalalignment='top',
             bbox=dict(boxstyle='round,pad=0.25', facecolor='white', alpha=0.85, edgecolor='#888'),
         )
-        ax_top.legend(fontsize=8, loc='upper right')
+        ax_top.legend(fontsize=18, loc='upper right')
+        ax_top.tick_params(axis='both', labelsize=18)
 
         # ---- 下: 原始 m ----
         ax_bot.hist(w_np, bins=60, alpha=0.6, density=True,
                     label='Weight', color='#4C72B0')
         ax_bot.hist(m_raw, bins=60, alpha=0.6, density=True,
                     label='Mem (raw)', color='#55A868')
-        ax_bot.set_title(f'Ch {c}  (raw membrane)')
+        ax_bot.set_title(f'Ch {c}  (raw membrane)', fontsize=22)
         _draw_quant_grid_on_axis(ax_bot, scale_w, qmin_w, qmax_w, '#2E5AAC', '--')
         if m_bit <= 8:
             _draw_quant_grid_on_axis(ax_bot, scale_mem, qmin_m, qmax_m, '#2A9D4F', ':')
@@ -525,16 +586,17 @@ def _plot_weight_and_scaled_membrane(layer_name, w_per_ch, m_per_ch, k, s_w,
             rf'$s_w 2^k$={scale_mem:.4g}' + '\n'
             rf'w: [{qmin_w},{qmax_w}]·$s_w$' + '\n'
             + m_legend_bot,
-            transform=ax_bot.transAxes, fontsize=7, verticalalignment='top',
+            transform=ax_bot.transAxes, fontsize=16, verticalalignment='top',
             bbox=dict(boxstyle='round,pad=0.25', facecolor='white', alpha=0.85, edgecolor='#888'),
         )
-        ax_bot.legend(fontsize=8, loc='upper right')
+        ax_bot.legend(fontsize=18, loc='upper right')
+        ax_bot.tick_params(axis='both', labelsize=18)
 
     safe = layer_name.replace('.', '_')
     fig.suptitle(
         f'{layer_name}  (top: m/2^k vs w; bottom: raw m vs w; '
         f'{w_bit}-bit W / {m_bit}-bit mem)',
-        fontsize=11,
+        fontsize=20,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(os.path.join(output_dir, f'wm_{safe}.png'),
@@ -953,6 +1015,15 @@ def _fake_quant_scaled_weight_ste(module, scaled_weight, scale, zero_point):
     return (w_int - zero_point) * scale
 
 
+def _quantize_weight_tensor(module, weight):
+    """Quantize ``weight`` with this module's fixed quantization grid."""
+    scale, zero_point = _weight_qparams_view(module, weight)
+    fq = module.weight_fake_quant
+    w_int = torch.round(weight / scale) + zero_point
+    w_int = torch.clamp(w_int, fq.quant_min, fq.quant_max)
+    return (w_int - zero_point) * scale
+
+
 def _forward_layer_with_weight(module, x, weight):
     import torch.nn.functional as Fn
     bias = module.bias.detach() if module.bias is not None else None
@@ -1171,7 +1242,7 @@ def _distill_layer(module, cached_inps, cached_outs, cached_batch_sizes=None,
         log(f"    Final: best_loss={best_loss:.6f} (iter {best_iter})")
 
 
-def adaround_optimize(model, loader, num_batches=8, num_iters=500, lr=3e-3,
+def _legacy_distill_optimize(model, loader, num_batches=8, num_iters=500, lr=3e-3,
                       mem_lam=0.25, reg_lam_scale=1e-4,
                       max_code_shift=2.0, min_iters=50,
                       early_stop_patience=0, improve_eps=1e-6,
@@ -1238,6 +1309,657 @@ def adaround_optimize(model, loader, num_batches=8, num_iters=500, lr=3e-3,
     del layer_data
     torch.cuda.empty_cache()
     log("[Distill] Optimization completed.")
+
+
+def _adaround_layer(module, cached_inps, cached_outs,
+                    num_iters=500, lr=3e-3, reg_lam_scale=0.01,
+                    grad_clip=1.0, log_interval=100,
+                    device='cuda', logger=None):
+    """Optimize only standard AdaRound floor/ceil decisions for one layer."""
+    log = logger.info if logger else print
+    fq = module.weight_fake_quant
+    if not isinstance(fq, AdaRoundFakeQuantize):
+        raise TypeError(
+            f"AdaRound requires AdaRoundFakeQuantize, got {type(fq).__name__}"
+        )
+
+    w_orig = module.weight.detach().clone().to(device)
+    fq.init(w_orig)
+    optimizer = torch.optim.Adam([fq.alpha], lr=lr)
+    ref_max = max(y.abs().max().item() for y in cached_outs) + 1e-8
+    reg_lam = float(reg_lam_scale) * ref_max
+    log_interval = max(1, int(log_interval))
+
+    best_loss = float('inf')
+    best_alpha = fq.alpha.detach().clone()
+    for it in range(num_iters):
+        beta = 20.0 - 18.0 * (it / max(num_iters - 1, 1))
+        w_quant = fq.adaround_forward(w_orig, hard_value=False)
+        recon_loss = torch.zeros((), device=device)
+        for x_cpu, y_cpu in zip(cached_inps, cached_outs):
+            x = x_cpu.to(device)
+            y_ref = y_cpu.to(device)
+            y_quant = _forward_layer_with_weight(module, x, w_quant)
+            recon_loss = recon_loss + _tensor_mse(y_quant, y_ref)
+        recon_loss = recon_loss / len(cached_inps)
+
+        h = fq.rectified_sigmoid()
+        round_loss = (1.0 - (2.0 * h - 1.0).abs().pow(beta)).mean()
+        total_loss = recon_loss + reg_lam * round_loss
+
+        loss_value = total_loss.item()
+        if loss_value < best_loss:
+            best_loss = loss_value
+            best_alpha = fq.alpha.detach().clone()
+
+        optimizer.zero_grad()
+        total_loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_([fq.alpha], max_norm=grad_clip)
+        optimizer.step()
+
+        if it % log_interval == 0 or it == num_iters - 1:
+            frac_up = (fq.alpha >= 0).float().mean().item()
+            log(
+                f"    iter {it:4d}/{num_iters}: loss={loss_value:.6f} "
+                f"(best={best_loss:.6f}), recon={recon_loss.item():.6f}, "
+                f"round={round_loss.item():.6f}, beta={beta:.1f}, "
+                f"round-up={frac_up * 100:.1f}%"
+            )
+
+    fq.alpha.data.copy_(best_alpha)
+    fq.alpha.requires_grad_(False)
+    fq.hard_value = True
+    with torch.no_grad():
+        frac_up = (fq.alpha >= 0).float().mean().item()
+        hard_weight = fq.get_hard_value(w_orig)
+        scale, _ = _weight_qparams_view(module, hard_weight)
+        hard_codes = hard_weight / scale
+        integer_error = (hard_codes - hard_codes.round()).abs().max().item()
+    log(
+        f"    Final hard rounding: {frac_up * 100:.1f}% round-up, "
+        f"best_loss={best_loss:.6f}, max_integer_error={integer_error:.2e}"
+    )
+
+
+def adaround_optimize(model, loader, num_batches=8, num_iters=500, lr=3e-3,
+                      mem_lam=0.25, reg_lam_scale=0.01,
+                      max_code_shift=2.0, min_iters=50,
+                      early_stop_patience=0, improve_eps=1e-6,
+                      grad_clip=1.0, log_interval=100,
+                      device='cuda', logger=None):
+    """Standard layer-wise AdaRound with hard floor/ceil evaluation weights."""
+    del mem_lam, max_code_shift, min_iters, early_stop_patience, improve_eps
+    log = logger.info if logger else print
+    log("\n[AdaRound] Collecting calibration data...")
+    layer_data = _collect_layer_io(model, loader, num_batches, device, logger)
+    quant_layers = [(n, m) for n, m in model.named_modules()
+                    if isinstance(m, (QuantConv2d, QuantLinear))]
+    log(
+        f"\n[AdaRound] Optimizing {len(quant_layers)} layers "
+        "(output MSE + rounding regularization)..."
+    )
+    for idx, (name, module) in enumerate(quant_layers):
+        tag = f"[{idx + 1}/{len(quant_layers)}]"
+        if name not in layer_data:
+            log(f"  {tag} {name}: no data, skipping")
+            continue
+        log(f"  {tag} {name} ({module.bit}-bit)")
+        if module.bit >= 12:
+            log(f"    Skipped (bit={module.bit} >= 12)")
+            continue
+        t0 = time.time()
+        _adaround_layer(
+            module, layer_data[name]['inputs'], layer_data[name]['outputs'],
+            num_iters=num_iters, lr=lr, reg_lam_scale=reg_lam_scale,
+            grad_clip=grad_clip, log_interval=log_interval,
+            device=device, logger=logger,
+        )
+        log(f"    Done ({time.time() - t0:.1f}s)")
+    del layer_data
+    torch.cuda.empty_cache()
+    log("[AdaRound] Optimization completed with hard floor/ceil weights.")
+
+
+# ============================================================
+# BRECQ / QDrop-style block reconstruction baselines
+# ============================================================
+
+def _is_quant_weight_layer(module):
+    return isinstance(module, (QuantConv2d, QuantLinear))
+
+
+def _find_reconstruction_blocks(model):
+    """Return SDT-aware reconstruction units in forward order."""
+    blocks = []
+    if hasattr(model, 'patch_embed'):
+        blocks.append(('patch_embed', model.patch_embed))
+    if hasattr(model, 'block'):
+        for i, blk in enumerate(model.block):
+            blocks.append((f'block.{i}', blk))
+    if hasattr(model, 'head'):
+        blocks.append(('head', model.head))
+    return blocks
+
+
+def _iter_quant_layers_in_module(module):
+    for name, sub in module.named_modules():
+        if _is_quant_weight_layer(sub):
+            yield name, sub
+
+
+@torch.no_grad()
+def _collect_block_io(model, block, loader, num_batches=8, device='cuda'):
+    """Collect one block's input/output under the current floating-weight path."""
+    from spikingjelly.clock_driven import functional
+
+    inps, outs = [], []
+
+    def hook_fn(mod, inp, out):
+        if len(inps) >= num_batches:
+            return
+        x = inp[0]
+        y = out[0] if isinstance(out, tuple) else out
+        if isinstance(x, tuple):
+            x = x[0]
+        if isinstance(y, tuple):
+            y = y[0]
+        inps.append(x.detach().cpu())
+        outs.append(y.detach().cpu())
+
+    h = block.register_forward_hook(hook_fn)
+    model.eval()
+    for i, (images, _) in enumerate(loader):
+        if i >= num_batches:
+            break
+        images = images.float().to(device)
+        model(images)
+        functional.reset_net(model)
+    h.remove()
+    return inps, outs
+
+
+def _make_quant_weight_from_z(module, z_opt, scale, zero_point, qdrop_prob=0.0):
+    w_q = _fake_quant_scaled_weight_ste(module, z_opt, scale, zero_point)
+    if qdrop_prob and qdrop_prob > 0:
+        w_fp = z_opt * scale
+        if qdrop_prob >= 1:
+            return w_fp
+        keep_fp = torch.rand_like(w_q) < float(qdrop_prob)
+        return torch.where(keep_fp, w_fp, w_q)
+    return w_q
+
+
+class _TemporaryQuantWeights:
+    """Temporarily replace QuantConv/Linear weights with differentiable tensors."""
+
+    def __init__(self, items, qdrop_prob=0.0):
+        self.items = items
+        self.qdrop_prob = qdrop_prob
+        self.original = []
+
+    def __enter__(self):
+        for module, z_opt, scale, zero_point in self.items:
+            self.original.append((module, module.weight))
+            w_tmp = _make_quant_weight_from_z(
+                module, z_opt, scale, zero_point, self.qdrop_prob)
+            module._parameters['weight'] = w_tmp
+            module.fake_quant_enabled = False
+            module.weight_fake_quant.disable_fake_quant()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for module, weight_param in self.original:
+            module._parameters['weight'] = weight_param
+        return False
+
+
+def _set_block_quant_enabled(block, enabled):
+    for _, module in _iter_quant_layers_in_module(block):
+        if enabled:
+            module.enable_fake_quant()
+        else:
+            module.disable_fake_quant()
+
+
+def _reset_spiking_state(module):
+    from spikingjelly.clock_driven.neuron import BaseNode
+    for sub in module.modules():
+        if isinstance(sub, BaseNode):
+            sub.reset()
+
+
+def _block_reconstruct_one(block_name, block, cached_inps, cached_outs, method,
+                           num_iters=500, lr=3e-3, reg_lam_scale=1e-4,
+                           max_code_shift=2.0, min_iters=50,
+                           early_stop_patience=0, improve_eps=1e-6,
+                           grad_clip=1.0, log_interval=100,
+                           qdrop_prob=0.5, device='cuda', logger=None):
+    log = logger.info if logger else print
+
+    quant_layers = [(n, m) for n, m in _iter_quant_layers_in_module(block)
+                    if m.bit < 12]
+    if not quant_layers:
+        log(f"    no low-bit quantized weights, skipping")
+        return
+
+    opt_items = []
+    params = []
+    ref_items = []
+    for _, module in quant_layers:
+        w_ref = module.weight.data.detach().clone().to(device)
+        scale, zero_point = _weight_qparams_view(module, w_ref)
+        z_ref = w_ref / scale
+        z_opt = nn.Parameter(z_ref.clone())
+        opt_items.append((module, z_opt, scale, zero_point))
+        params.append(z_opt)
+        ref_items.append((z_ref, scale))
+
+    optimizer = torch.optim.Adam(params, lr=lr)
+    ref_max = max(y.abs().max().item() for y in cached_outs) + 1e-8
+    reg_lam = reg_lam_scale * ref_max
+    min_iters = min(int(min_iters), num_iters)
+    if early_stop_patience and early_stop_patience > 0:
+        early_stop_patience = int(early_stop_patience)
+    else:
+        early_stop_patience = min(80, max(20, num_iters // 10))
+    log_interval = max(1, int(log_interval))
+    qdrop = float(qdrop_prob) if method == 'qdrop' else 0.0
+
+    _set_block_quant_enabled(block, False)
+    best_loss = float('inf')
+    best_z = [p.detach().clone().cpu() for p in params]
+    best_iter = -1
+    best_stats = {}
+
+    for it in range(num_iters):
+        optimizer.zero_grad()
+        recon_loss_value = 0.0
+        for x_cpu, y_cpu in zip(cached_inps, cached_outs):
+            x = x_cpu.to(device)
+            y_ref = y_cpu.to(device)
+            _reset_spiking_state(block)
+            with _TemporaryQuantWeights(opt_items, qdrop_prob=qdrop):
+                y_q = block(x)
+            _reset_spiking_state(block)
+            if isinstance(y_q, tuple):
+                y_q = y_q[0]
+            loss_i = _tensor_mse(y_q, y_ref) / len(cached_inps)
+            recon_loss_value += loss_i.detach().item()
+            loss_i.backward()
+            del x, y_ref, y_q, loss_i
+
+        reg = torch.tensor(0.0, device=device)
+        n_reg = 0
+        max_shift_now = 0.0
+        mean_shift_now = 0.0
+        for z_opt, (z_ref, _) in zip(params, ref_items):
+            shift = (z_opt - z_ref).abs()
+            reg = reg + (shift ** 2).mean()
+            n_reg += 1
+            max_shift_now = max(max_shift_now, shift.max().item())
+            mean_shift_now += shift.mean().item()
+        reg = reg / max(1, n_reg)
+        mean_shift_now = mean_shift_now / max(1, n_reg)
+        reg_loss = reg_lam * reg
+        total_loss_value = recon_loss_value + reg_loss.detach().item()
+
+        loss_val = total_loss_value
+        if loss_val < best_loss - improve_eps:
+            best_loss = loss_val
+            best_iter = it
+            best_z = [p.detach().clone().cpu() for p in params]
+            best_stats = {
+                'out': recon_loss_value,
+                'reg': reg.item(),
+                'd_code_mean': mean_shift_now,
+                'd_code_max': max_shift_now,
+            }
+
+        reg_loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(params, max_norm=grad_clip)
+        optimizer.step()
+        if max_code_shift and max_code_shift > 0:
+            with torch.no_grad():
+                for z_opt, (z_ref, _) in zip(params, ref_items):
+                    z_opt.clamp_(z_ref - max_code_shift, z_ref + max_code_shift)
+
+        if it % log_interval == 0 or it == num_iters - 1:
+            log(
+                f"    iter {it:4d}/{num_iters}: loss={loss_val:.6f} "
+                f"(best={best_loss:.6f}), out={recon_loss_value:.6f}, "
+                f"reg={reg.item():.6f}, |d_code|={mean_shift_now:.4f}/"
+                f"{max_shift_now:.4f}"
+            )
+
+        if it + 1 >= min_iters and it - best_iter >= early_stop_patience:
+            log(
+                f"    early stop at iter {it}: no best improvement for "
+                f"{early_stop_patience} iters (best at {best_iter})"
+            )
+            break
+
+    with torch.no_grad():
+        for (module, _, scale, zero_point), z_best in zip(opt_items, best_z):
+            z_best = z_best.to(device)
+            w_q = _fake_quant_scaled_weight_ste(module, z_best, scale, zero_point)
+            module.weight.data.copy_(w_q.to(module.weight.device, module.weight.dtype))
+
+    if best_stats:
+        log(
+            f"    Final: best_loss={best_loss:.6f} (iter {best_iter}), "
+            f"best_out={best_stats['out']:.6f}, best_reg={best_stats['reg']:.6f}, "
+            f"best|d_code|={best_stats['d_code_mean']:.4f}/"
+            f"{best_stats['d_code_max']:.4f}"
+        )
+    else:
+        log(f"    Final: best_loss={best_loss:.6f} (iter {best_iter})")
+
+
+def block_reconstruct_optimize(model, loader, method='brecq', num_batches=8,
+                               num_iters=500, lr=3e-3, reg_lam_scale=1e-4,
+                               max_code_shift=2.0, min_iters=50,
+                               early_stop_patience=0, improve_eps=1e-6,
+                               grad_clip=1.0, log_interval=100,
+                               qdrop_prob=0.5, device='cuda', logger=None):
+    """
+    SDT-aware BRECQ/QDrop-style baseline.
+
+    BRECQ reconstructs patch/head/transformer-block outputs. QDrop uses the same
+    block objective but randomly keeps a fraction of floating weights during
+    reconstruction, mimicking drop-quantization without activation fake quant.
+    """
+    log = logger.info if logger else print
+    blocks = _find_reconstruction_blocks(model)
+    log(
+        f"\n[BlockRecon] Optimizing {len(blocks)} blocks "
+        f"(method={method}, qdrop_prob={qdrop_prob if method == 'qdrop' else 0.0})..."
+    )
+
+    for idx, (name, block) in enumerate(blocks):
+        tag = f"[{idx+1}/{len(blocks)}]"
+        q_layers = [(n, m) for n, m in _iter_quant_layers_in_module(block)]
+        log(f"  {tag} {name}: {len(q_layers)} quantized layers")
+        if not q_layers:
+            continue
+
+        t0 = time.time()
+        _set_block_quant_enabled(block, False)
+        cached_inps, cached_outs = _collect_block_io(
+            model, block, loader, num_batches=num_batches, device=device)
+        if not cached_inps:
+            log(f"    no calibration data, skipping")
+            continue
+
+        _block_reconstruct_one(
+            name, block, cached_inps, cached_outs, method=method,
+            num_iters=num_iters, lr=lr,
+            reg_lam_scale=reg_lam_scale,
+            max_code_shift=max_code_shift,
+            min_iters=min_iters,
+            early_stop_patience=early_stop_patience,
+            improve_eps=improve_eps,
+            grad_clip=grad_clip,
+            log_interval=log_interval,
+            qdrop_prob=qdrop_prob,
+            device=device,
+            logger=logger,
+        )
+        del cached_inps, cached_outs
+        torch.cuda.empty_cache()
+        log(f"    Done ({time.time() - t0:.1f}s)")
+
+    log("[BlockRecon] Optimization completed.")
+
+
+# ============================================================
+# GPTQ weight compensation baseline
+# ============================================================
+
+def _sample_columns(x_cols, max_cols):
+    """Return at most ``max_cols`` activation columns without moving devices."""
+    n_cols = x_cols.shape[1]
+    if n_cols <= max_cols:
+        return x_cols
+    idx = torch.randperm(n_cols, device=x_cols.device)[:max_cols]
+    return x_cols[:, idx]
+
+
+def _conv_input_to_columns(module, x, max_cols):
+    import torch.nn.functional as Fn
+
+    if module.groups != 1:
+        return None
+    x_cols = Fn.unfold(
+        x,
+        kernel_size=module.kernel_size,
+        dilation=module.dilation,
+        padding=module.padding,
+        stride=module.stride,
+    )
+    x_cols = x_cols.transpose(1, 2).reshape(-1, x_cols.shape[1]).transpose(0, 1)
+    return _sample_columns(x_cols.contiguous(), max_cols)
+
+
+def _linear_input_to_columns(module, x, max_cols):
+    x_cols = x.reshape(-1, x.shape[-1]).transpose(0, 1)
+    return _sample_columns(x_cols.contiguous(), max_cols)
+
+
+@torch.no_grad()
+def _collect_gptq_hessians(model, loader, num_batches=8, max_samples=32768,
+                           device='cuda', logger=None):
+    """Collect layer input covariance matrices for the GPTQ baseline."""
+    from collections import OrderedDict
+    from spikingjelly.clock_driven import functional
+
+    log = logger.info if logger else print
+    stats = OrderedDict()
+    hooks = []
+
+    quant_layers = [(n, m) for n, m in model.named_modules()
+                    if isinstance(m, (QuantConv2d, QuantLinear))]
+
+    for name, module in quant_layers:
+        if isinstance(module, QuantConv2d):
+            if module.groups != 1:
+                log(f"  {name}: skip GPTQ Hessian collection (groups={module.groups})")
+                continue
+            n_features = (
+                module.in_channels * module.kernel_size[0] * module.kernel_size[1]
+            )
+        else:
+            n_features = module.in_features
+
+        stats[name] = {
+            'module': module,
+            'H': torch.zeros(n_features, n_features, dtype=torch.float32),
+            'samples': 0,
+        }
+
+        def _make_hook(layer_name):
+            def hook_fn(mod, inp, out):
+                entry = stats[layer_name]
+                remaining = max_samples - entry['samples']
+                if remaining <= 0:
+                    return
+
+                x = inp[0]
+                if isinstance(x, tuple):
+                    x = x[0]
+                x = x.detach()
+
+                if isinstance(mod, QuantConv2d):
+                    x_cols = _conv_input_to_columns(mod, x, remaining)
+                else:
+                    x_cols = _linear_input_to_columns(mod, x, remaining)
+                if x_cols is None or x_cols.numel() == 0:
+                    return
+
+                x_cols = x_cols.float()
+                entry['H'].add_((x_cols @ x_cols.t()).cpu())
+                entry['samples'] += int(x_cols.shape[1])
+
+            return hook_fn
+
+        hooks.append(module.register_forward_hook(_make_hook(name)))
+
+    model.eval()
+    for i, (images, _) in enumerate(loader):
+        if i >= num_batches:
+            break
+        images = images.float().to(device)
+        model(images)
+        functional.reset_net(model)
+
+    for h in hooks:
+        h.remove()
+
+    collected = sum(1 for v in stats.values() if v['samples'] > 0)
+    log(f"  Collected GPTQ Hessians for {collected}/{len(stats)} layers")
+    return stats
+
+
+def _gptq_quantize_columns(module, W, H, n_samples, damp=0.01, block_size=128):
+    """Apply vanilla GPTQ column-wise compensation on a flattened weight matrix."""
+    fq = module.weight_fake_quant
+    device = W.device
+    dtype = W.dtype
+    H = H.to(device=device, dtype=torch.float32)
+    H = H / max(1, int(n_samples))
+
+    diag = torch.diag(H)
+    dead = diag <= 1e-12
+    if dead.any():
+        H[dead, dead] = 1.0
+        W[:, dead] = 0.0
+        diag = torch.diag(H)
+
+    damp_val = float(damp) * torch.mean(diag).clamp(min=1e-8)
+    idx = torch.arange(H.shape[0], device=device)
+    H[idx, idx] += damp_val
+
+    for attempt in range(5):
+        try:
+            chol = torch.linalg.cholesky(H)
+            Hinv = torch.cholesky_inverse(chol)
+            Hinv = torch.linalg.cholesky(Hinv, upper=True)
+            break
+        except RuntimeError:
+            H[idx, idx] += damp_val * (10 ** attempt)
+    else:
+        raise RuntimeError("GPTQ Hessian is not positive definite after damping")
+
+    scale = fq.scale.detach().to(device=device, dtype=dtype).reshape(-1, 1).clamp(min=1e-12)
+    zero_point = fq.zero_point.detach().to(device=device, dtype=dtype).reshape(-1, 1)
+    quant_min, quant_max = fq.quant_min, fq.quant_max
+
+    def quantize_col(w_col):
+        q = torch.round(w_col / scale[:, 0]) + zero_point[:, 0]
+        q = torch.clamp(q, quant_min, quant_max)
+        return (q - zero_point[:, 0]) * scale[:, 0]
+
+    columns = W.shape[1]
+    Q = torch.zeros_like(W)
+    losses = torch.zeros_like(W)
+    block_size = max(1, int(block_size))
+
+    for i1 in range(0, columns, block_size):
+        i2 = min(i1 + block_size, columns)
+        count = i2 - i1
+        W1 = W[:, i1:i2].clone()
+        Q1 = torch.zeros_like(W1)
+        Err1 = torch.zeros_like(W1)
+        Losses1 = torch.zeros_like(W1)
+        Hinv1 = Hinv[i1:i2, i1:i2]
+
+        for i in range(count):
+            w = W1[:, i]
+            d = Hinv1[i, i].clamp(min=1e-8)
+            q = quantize_col(w)
+            Q1[:, i] = q
+            Losses1[:, i] = (w - q) ** 2 / (d ** 2)
+            err = (w - q) / d
+            if i + 1 < count:
+                W1[:, i + 1:] -= err.unsqueeze(1) * Hinv1[i, i + 1:].unsqueeze(0)
+            Err1[:, i] = err
+
+        Q[:, i1:i2] = Q1
+        losses[:, i1:i2] = Losses1
+        if i2 < columns:
+            W[:, i2:] -= Err1 @ Hinv[i1:i2, i2:]
+
+    return Q, float(losses.mean().item()), int(dead.sum().item())
+
+
+@torch.no_grad()
+def gptq_optimize(model, loader, num_batches=8, damp=0.01, block_size=128,
+                  max_samples=32768, device='cuda', logger=None):
+    """
+    Vanilla GPTQ baseline.
+
+    This follows the SBC comparison protocol: use the same quantization grid as
+    RTN/our PTQ, but add ANN-style second-order weight-error compensation. It
+    intentionally does not use membrane reconstruction or an SMP Hessian.
+    """
+    log = logger.info if logger else print
+
+    log("\n[GPTQ] Collecting input Hessians...")
+    hessians = _collect_gptq_hessians(
+        model, loader,
+        num_batches=num_batches,
+        max_samples=max_samples,
+        device=device,
+        logger=logger,
+    )
+
+    quant_layers = [(n, m) for n, m in model.named_modules()
+                    if isinstance(m, (QuantConv2d, QuantLinear))]
+    log(f"\n[GPTQ] Quantizing {len(quant_layers)} layers with second-order compensation...")
+
+    for idx, (name, module) in enumerate(quant_layers):
+        tag = f"[{idx+1}/{len(quant_layers)}]"
+        if module.bit >= 12:
+            log(f"  {tag} {name}: skipped (bit={module.bit} >= 12)")
+            continue
+        if name not in hessians or hessians[name]['samples'] == 0:
+            log(f"  {tag} {name}: no Hessian data, fallback to RTN grid")
+            module.weight.data.copy_(_quantize_weight_tensor(module, module.weight).data)
+            continue
+        if isinstance(module, QuantConv2d) and module.groups != 1:
+            log(f"  {tag} {name}: grouped conv fallback to RTN")
+            module.weight.data.copy_(_quantize_weight_tensor(module, module.weight).data)
+            continue
+
+        t0 = time.time()
+        W_orig_shape = module.weight.shape
+        W = module.weight.detach().to(device).float().reshape(module.weight.shape[0], -1)
+        H = hessians[name]['H']
+        if H.shape[0] != W.shape[1]:
+            log(
+                f"  {tag} {name}: Hessian shape {tuple(H.shape)} does not match "
+                f"weight columns {W.shape[1]}, fallback to RTN"
+            )
+            module.weight.data.copy_(_quantize_weight_tensor(module, module.weight).data)
+            continue
+
+        Q, loss, n_dead = _gptq_quantize_columns(
+            module, W, H, hessians[name]['samples'],
+            damp=damp,
+            block_size=block_size,
+        )
+        module.weight.data.copy_(Q.reshape(W_orig_shape).to(module.weight.device, module.weight.dtype))
+        elapsed = time.time() - t0
+        log(
+            f"  {tag} {name}: samples={hessians[name]['samples']}, "
+            f"cols={W.shape[1]}, dead={n_dead}, loss={loss:.6e}, "
+            f"done ({elapsed:.1f}s)"
+        )
+
+    del hessians
+    torch.cuda.empty_cache()
+    log("[GPTQ] Compensation completed.")
 
 
 def get_model_size(model, unit='MB'):

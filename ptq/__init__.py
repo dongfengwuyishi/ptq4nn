@@ -92,7 +92,10 @@ from .quantize import (
 )
 
 # 主函数入口
-from .main import main as ptq_main
+def ptq_main():
+    """Load the CLI only when explicitly invoked."""
+    from .main import main
+    return main()
 
 __all__ = [
     # Observer

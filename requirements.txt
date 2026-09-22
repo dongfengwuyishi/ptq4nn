@@ -1,0 +1,11 @@
+# Install a matching torch/torchvision pair for your CUDA runtime first.
+# CPU checks were validated with torch 2.5.1 and torchvision 0.20.1.
+torch>=2.5,<2.6
+torchvision>=0.20,<0.21
+numpy>=1.24,<2
+timm==0.6.12
+spikingjelly==0.0.0.0.14
+PyYAML>=6,<7
+easydict>=1.10,<2
+matplotlib>=3.7,<4
+# SDT's original CUDA backend additionally requires cupy-cuda11x or cupy-cuda12x.

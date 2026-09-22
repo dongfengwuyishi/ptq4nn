@@ -1,12 +1,4 @@
-# ==========================================================
-# PTQ 配置 - CIFAR10-DVS
-# 运行: python ptq/main.py --config exp/cifar10-dvs/config.yml
-# ==========================================================
-
-# ========== 模型 ==========
-checkpoint: /mnt/disk2/st/output_links/sdtv1_output/train/20260129-164839-sdt-data-cifar10-dvs-t-10-spike-lif/model_best.pth.tar
-
-# 模型结构参数 (与训练时一致)
+checkpoint: pretrained/sdt_2_256_dvs.pth.tar
 time_steps: 10
 num_classes: 10
 num_heads: 8
@@ -15,45 +7,33 @@ in_channels: 2
 dim: 256
 mlp_ratio: 4
 layer: 2
-pooling_stat: "0011"
+pooling_stat: '0011'
 TET: true
-
-# ========== 数据 ==========
 dataset: cifar10-dvs
-data_dir: /mnt/disk2/xh2/data/cifar10_dvs
+data_dir: data/cifar10_dvs
 batch_size: 64
-
-# ========== 量化 ==========
 weight_bit: 4
 first_layer_bit: 16
 last_layer_bit: 8
 mem_bit: 4
-# patch_embed.proj_lif 膜电位位宽；默认 16；>=32 该层 FP 膜电位
 first_mem_bit: 4
 fold_bn: true
 observer: mse
 mem_observer: mse
-
-# ========== 量化方法 ==========
 fake_quant: adaround
 adaround_iters: 20000
 adaround_lr: 0.003
-recon_num_batches: 8          # layer-wise reconstruction calibration batches
-recon_mem_lam: 0.25           # pre-fire membrane reconstruction weight
-recon_reg_lam_scale: 0.0001   # reg_lam = recon_reg_lam_scale * layer output max
-recon_max_code_shift: 2.0     # max integer-code movement per weight
+recon_num_batches: 8
+recon_mem_lam: 0.25
+recon_reg_lam_scale: 0.0001
+recon_max_code_shift: 2.0
 recon_min_iters: 50
-recon_early_stop_patience: 0  # 0=auto: min(80, max(20, iters/10))
-recon_improve_eps: 0.000001
+recon_early_stop_patience: 0
+recon_improve_eps: 1.0e-06
 recon_grad_clip: 1.0
 recon_log_interval: 100
-
-# ========== Scale Bridging ==========
 scale_bridge: unify
-
-# ========== 运行 ==========
-gpu: 4
+gpu: 0
 output_dir: output/ptq/cifar10-dvs
-
-# ========== 其他 ==========
 seed: 520
+calibration_samples: 1024

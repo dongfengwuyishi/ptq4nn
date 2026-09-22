@@ -26,7 +26,7 @@ from timm.data import create_dataset, create_loader
 from timm.utils import accuracy, AverageMeter
 from spikingjelly.clock_driven import functional
 from spikingjelly.datasets.cifar10_dvs import CIFAR10DVS
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import model  # noqa: F401 - 注册 sdt
 import dvs_utils
 
@@ -133,6 +133,18 @@ DATASET_STATS = {
 }
 
 
+class CalibrationSubset(Subset):
+    """Forward timm's transform assignment to the underlying image dataset."""
+
+    @property
+    def transform(self):
+        return self.dataset.transform
+
+    @transform.setter
+    def transform(self, transform):
+        self.dataset.transform = transform
+
+
 # ============================================================
 # 主函数
 # ============================================================
@@ -150,7 +162,7 @@ def main():
     # 所有参数从 cfg 取, 给默认值
     checkpoint    = abs_path(cfg['checkpoint'])
     dataset_name  = cfg.get('dataset', 'torch/cifar10')
-    data_dir      = cfg.get('data_dir', '/mnt/disk2/xh2/data')
+    data_dir      = abs_path(cfg.get('data_dir', 'data'))
     batch_size    = cfg.get('batch_size', 64)
     crop_pct      = cfg.get('crop_pct', 1.0)
     weight_bit    = cfg.get('weight_bit', 4)
@@ -160,6 +172,9 @@ def main():
     first_mem_bit = cfg.get('first_mem_bit', 16)
     fold_bn       = cfg.get('fold_bn', True)
     seed          = cfg.get('seed', 42)  # 随机数种子
+    calibration_samples = int(cfg.get('calibration_samples', 1024))
+    if calibration_samples <= 0:
+        raise ValueError('calibration_samples must be positive')
     gpu           = cfg.get('gpu', 0)
     output_base   = abs_path(cfg.get('output_dir', 'output/ptq'))
 
@@ -177,6 +192,21 @@ def main():
     recon_improve_eps = cfg.get('recon_improve_eps', 1e-6)
     recon_grad_clip = cfg.get('recon_grad_clip', 1.0)
     recon_log_interval = cfg.get('recon_log_interval', 100)
+    gptq_num_batches = cfg.get('gptq_num_batches', recon_num_batches)
+    gptq_damp = cfg.get('gptq_damp', 0.01)
+    gptq_block_size = cfg.get('gptq_block_size', 128)
+    gptq_max_samples = cfg.get('gptq_max_samples', 32768)
+    block_recon_num_batches = cfg.get('block_recon_num_batches', recon_num_batches)
+    block_recon_iters = cfg.get('block_recon_iters', adaround_iters)
+    block_recon_lr = cfg.get('block_recon_lr', adaround_lr)
+    block_recon_reg_lam_scale = cfg.get('block_recon_reg_lam_scale', recon_reg_lam_scale)
+    block_recon_max_code_shift = cfg.get('block_recon_max_code_shift', recon_max_code_shift)
+    block_recon_min_iters = cfg.get('block_recon_min_iters', recon_min_iters)
+    block_recon_early_stop_patience = cfg.get('block_recon_early_stop_patience', recon_early_stop_patience)
+    block_recon_improve_eps = cfg.get('block_recon_improve_eps', recon_improve_eps)
+    block_recon_grad_clip = cfg.get('block_recon_grad_clip', recon_grad_clip)
+    block_recon_log_interval = cfg.get('block_recon_log_interval', recon_log_interval)
+    qdrop_prob = cfg.get('qdrop_prob', 0.5)
     # Scale bridging & 膜电位 observer 参数
     scale_bridge       = cfg.get('scale_bridge', 'weight')
     mem_observer       = cfg.get('mem_observer', '')
@@ -235,14 +265,28 @@ def main():
         log(f'  AdaRound iters:    {adaround_iters}')
         log(f'  AdaRound lr:       {adaround_lr}')
         log(
-            f'  Recon:             batches={recon_num_batches}, '
-            f'mem_lam={recon_mem_lam}, reg_scale={recon_reg_lam_scale}, '
-            f'max_shift={recon_max_code_shift}'
+            f'  AdaRound recon:    batches={recon_num_batches}, '
+            f'round_reg={recon_reg_lam_scale}, '
+            f'grad_clip={recon_grad_clip}, log_interval={recon_log_interval}'
+        )
+    elif fake_quant_name == 'gptq':
+        log(
+            f'  GPTQ:              batches={gptq_num_batches}, '
+            f'damp={gptq_damp}, block={gptq_block_size}, '
+            f'max_samples={gptq_max_samples}'
+        )
+    elif fake_quant_name in ('brecq', 'qdrop'):
+        log(
+            f'  Block recon:       batches={block_recon_num_batches}, '
+            f'iters={block_recon_iters}, lr={block_recon_lr}, '
+            f'reg_scale={block_recon_reg_lam_scale}, '
+            f'max_shift={block_recon_max_code_shift}'
         )
         log(
-            f'                     min_iters={recon_min_iters}, '
-            f'patience={recon_early_stop_patience or "auto"}, '
-            f'grad_clip={recon_grad_clip}, log_interval={recon_log_interval}'
+            f'                     min_iters={block_recon_min_iters}, '
+            f'patience={block_recon_early_stop_patience or "auto"}, '
+            f'grad_clip={block_recon_grad_clip}, '
+            f'qdrop_prob={qdrop_prob if fake_quant_name == "qdrop" else 0.0}'
         )
     if mem_bit < 32:
         log(f'Mem observer: {mem_observer or "(same as weight)"}')
@@ -271,9 +315,13 @@ def main():
     if dataset_name == 'cifar10-dvs':
         ds_full = CIFAR10DVS(data_dir, data_type='frame', frames_number=T,
                              split_by='number', transform=dvs_utils.Resize(img_size))
-        _, ds_eval = dvs_utils.split_to_train_test_set(0.9, ds_full, 10)
+        ds_calib, ds_eval = dvs_utils.split_to_train_test_set(0.9, ds_full, 10)
         loader = DataLoader(ds_eval, batch_size=batch_size, shuffle=False,
                             num_workers=4, pin_memory=True)
+        indices = torch.randperm(len(ds_calib), generator=torch.Generator().manual_seed(seed))
+        ds_calib = Subset(ds_calib, indices[:calibration_samples].tolist())
+        calibration_loader = DataLoader(ds_calib, batch_size=batch_size, shuffle=False,
+                                        num_workers=4, pin_memory=True)
         log(f'  CIFAR10-DVS: {len(ds_eval)} samples')
     else:
         ds_eval = create_dataset(dataset_name, root=data_dir,
@@ -286,6 +334,17 @@ def main():
                                std=stats['std'], num_workers=4,
                                crop_pct=crop_pct, pin_memory=True)
         log(f'  {dataset_name}: {len(ds_eval)} samples')
+        ds_calib = create_dataset(dataset_name, root=data_dir,
+                                  split='train', is_training=False,
+                                  batch_size=batch_size)
+        indices = torch.randperm(len(ds_calib), generator=torch.Generator().manual_seed(seed))
+        ds_calib = CalibrationSubset(ds_calib, indices[:calibration_samples].tolist())
+        calibration_loader = create_loader(
+            ds_calib, input_size=stats['input_size'], batch_size=batch_size,
+            is_training=False, use_prefetcher=False, mean=stats['mean'],
+            std=stats['std'], num_workers=4, crop_pct=crop_pct, pin_memory=True,
+        )
+    log(f'  Calibration pool: {len(ds_calib)} training samples (disjoint from evaluation)')
 
     # ---------- [3/6] 原始精度 ----------
     log('\n[3/6] Testing original model...')
@@ -336,6 +395,21 @@ def main():
         recon_improve_eps=recon_improve_eps,
         recon_grad_clip=recon_grad_clip,
         recon_log_interval=recon_log_interval,
+        gptq_num_batches=gptq_num_batches,
+        gptq_damp=gptq_damp,
+        gptq_block_size=gptq_block_size,
+        gptq_max_samples=gptq_max_samples,
+        block_recon_num_batches=block_recon_num_batches,
+        block_recon_iters=block_recon_iters,
+        block_recon_lr=block_recon_lr,
+        block_recon_reg_lam_scale=block_recon_reg_lam_scale,
+        block_recon_max_code_shift=block_recon_max_code_shift,
+        block_recon_min_iters=block_recon_min_iters,
+        block_recon_early_stop_patience=block_recon_early_stop_patience,
+        block_recon_improve_eps=block_recon_improve_eps,
+        block_recon_grad_clip=block_recon_grad_clip,
+        block_recon_log_interval=block_recon_log_interval,
+        qdrop_prob=qdrop_prob,
         scale_bridge=scale_bridge,
         use_tet=use_tet,
         mem_observer=mem_observer,
@@ -343,7 +417,7 @@ def main():
 
     log(f'  Using {fake_quant_name} PTQ')
     quant_mdl = quantize_model(
-        mdl, ptq_cfg, cali_data=loader, device=device, logger=logger,
+        mdl, ptq_cfg, cali_data=calibration_loader, device=device, logger=logger,
         output_dir=output_dir,
     )
 
